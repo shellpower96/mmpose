@@ -1,0 +1,4 @@
+[ZoneTransfer]
+ZoneId=3
+ReferrerUrl=https://mmpose.readthedocs.io/zh-cn/dev-1.x/model_zoo/wholebody_2d_keypoint.html
+HostUrl=https://download.openmmlab.com/mmpose/top_down/hrnet/hrnet_w48_coco_wholebody_384x288_dark-f5726563_20200918.pth

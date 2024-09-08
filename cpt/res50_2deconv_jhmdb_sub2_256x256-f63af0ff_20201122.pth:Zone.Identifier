@@ -1,0 +1,4 @@
+[ZoneTransfer]
+ZoneId=3
+ReferrerUrl=https://mmpose.readthedocs.io/zh-cn/dev-1.x/model_zoo/body_2d_keypoint.html
+HostUrl=https://download.openmmlab.com/mmpose/top_down/resnet/res50_2deconv_jhmdb_sub2_256x256-f63af0ff_20201122.pth

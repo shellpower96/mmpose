@@ -12,7 +12,7 @@ from .bbox.transforms import get_warp_matrix
 from .pose_data_sample import PoseDataSample
 
 
-def merge_data_samples(data_samples: List[PoseDataSample]) -> PoseDataSample:
+def merge_data_samples(data_samples: List[PoseDataSample], side) -> PoseDataSample:
     """Merge the given data samples into a single data sample.
 
     This function can be used to merge the top-down predictions with

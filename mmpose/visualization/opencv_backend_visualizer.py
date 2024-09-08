@@ -38,7 +38,7 @@ class OpencvBackendVisualizer(Visualizer):
         assert backend in ('opencv', 'matplotlib'), f'the argument ' \
             f'\'backend\' must be either \'opencv\' or \'matplotlib\', ' \
             f'but got \'{backend}\'.'
-        self.backend = backend
+        self.backend = 'matplotlib'
 
     @master_only
     def set_image(self, image: np.ndarray) -> None:

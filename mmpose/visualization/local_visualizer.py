@@ -2,20 +2,20 @@
 import math
 import warnings
 from typing import Dict, List, Optional, Tuple, Union
-
+import pandas as pd
 import cv2
 import mmcv
 import numpy as np
 import torch
 from mmengine.dist import master_only
 from mmengine.structures import InstanceData, PixelData
-
+from PIL import Image, ImageDraw, ImageFont
 from mmpose.datasets.datasets.utils import parse_pose_metainfo
 from mmpose.registry import VISUALIZERS
 from mmpose.structures import PoseDataSample
 from .opencv_backend_visualizer import OpencvBackendVisualizer
 from .simcc_vis import SimCCVisualizer
-
+from PIL import Image
 
 def _get_adaptive_scales(areas: np.ndarray,
                          min_area: int = 800,
@@ -117,7 +117,8 @@ class PoseLocalVisualizer(OpencvBackendVisualizer):
                  radius: Union[int, float] = 3,
                  show_keypoint_weight: bool = False,
                  backend: str = 'opencv',
-                 alpha: float = 1.0):
+                 alpha: float = 1.0,
+                 side: int = 1,):
 
         warnings.filterwarnings(
             'ignore',
@@ -140,6 +141,7 @@ class PoseLocalVisualizer(OpencvBackendVisualizer):
         self.radius = radius
         self.alpha = alpha
         self.show_keypoint_weight = show_keypoint_weight
+        self.side = side
         # Set default value. When calling
         # `PoseLocalVisualizer().set_dataset_meta(xxx)`,
         # it will override the default value.
@@ -147,13 +149,15 @@ class PoseLocalVisualizer(OpencvBackendVisualizer):
 
     def set_dataset_meta(self,
                          dataset_meta: Dict,
-                         skeleton_style: str = 'mmpose'):
+                         skeleton_style: str = 'mmpose', side: int = 1, show_lines: bool = True):
         """Assign dataset_meta to the visualizer. The default visualization
         settings will be overridden.
 
         Args:
             dataset_meta (dict): meta information of dataset.
         """
+        self.side = side
+        self.show_lines = show_lines
         if skeleton_style == 'openpose':
             dataset_name = dataset_meta['dataset_name']
             if dataset_name == 'coco':
@@ -180,7 +184,223 @@ class PoseLocalVisualizer(OpencvBackendVisualizer):
         # it should be converted to a dict at these times
         if self.dataset_meta is None:
             self.dataset_meta = {}
+    def _draw_instances_bbox(self, image: np.ndarray,
+                             instances: InstanceData) -> np.ndarray:
+        """Draw bounding boxes and corresponding labels of GT or prediction.
 
+        Args:
+            image (np.ndarray): The image to draw.
+            instances (:obj:`InstanceData`): Data structure for
+                instance-level annotations or predictions.
+
+        Returns:
+            np.ndarray: the drawn image which channel is RGB.
+        """
+        self.set_image(image)
+
+        if 'bboxes' in instances:
+            bboxes = instances.bboxes
+            self.draw_bboxes(
+                bboxes,
+                edge_colors=self.bbox_color,
+                alpha=self.alpha,
+                line_widths=self.line_width)
+        else:
+            return self.get_image()
+
+        if 'labels' in instances and self.text_color is not None:
+            classes = self.dataset_meta.get('classes', None)
+            labels = instances.labels
+
+            positions = bboxes[:, :2]
+            areas = (bboxes[:, 3] - bboxes[:, 1]) * (
+                bboxes[:, 2] - bboxes[:, 0])
+            scales = _get_adaptive_scales(areas)
+
+            for i, (pos, label) in enumerate(zip(positions, labels)):
+                label_text = classes[
+                    label] if classes is not None else f'class {label}'
+
+                if isinstance(self.bbox_color,
+                              tuple) and max(self.bbox_color) > 1:
+                    facecolor = [c / 255.0 for c in self.bbox_color]
+                else:
+                    facecolor = self.bbox_color
+
+                self.draw_texts(
+                    label_text,
+                    pos,
+                    colors=self.text_color,
+                    font_sizes=int(13 * scales[i]),
+                    vertical_alignments='bottom',
+                    bboxes=[{
+                        'facecolor': facecolor,
+                        'alpha': 0.8,
+                        'pad': 0.7,
+                        'edgecolor': 'none'
+                    }])
+
+        return self.get_image()
+
+    def my_draw_instances_kpts(self,
+                             image: np.ndarray,
+                             instances: InstanceData,
+                             kpt_thr: float = 0.3,
+                             show_kpt_idx: bool = False,
+                             skeleton_style: str = 'mmpose',
+                             side: int = 1,):
+        """Draw keypoints and skeletons (optional) of GT or prediction.
+
+        Args:
+            image (np.ndarray): The image to draw.
+            instances (:obj:`InstanceData`): Data structure for
+                instance-level annotations or predictions.
+            kpt_thr (float, optional): Minimum threshold of keypoints
+                to be shown. Default: 0.3.
+            show_kpt_idx (bool): Whether to show the index of keypoints.
+                Defaults to ``False``
+            skeleton_style (str): Skeleton style selection. Defaults to
+                ``'mmpose'``
+
+        Returns:
+            np.ndarray: the drawn image which channel is RGB.
+        """
+        ## 定义点和线的颜色
+        img_h, img_w, _ = image.shape
+        transparent_image = np.zeros((img_h, img_w, 3), dtype=np.uint8)
+        self.set_image(transparent_image)
+        
+        if instances.keypoints.shape[1] ==26:
+            a = np.array([255,69,0], dtype=np.uint8)
+            self.kpt_color = np.expand_dims(a,0).repeat(26,axis=0)
+            b = np.array([51, 153, 255], dtype=np.uint8)
+            self.link_color = np.expand_dims(b,0).repeat(27,axis=0)
+            if skeleton_style == 'openpose':
+                return self._draw_instances_kpts_openpose(image, instances,
+                                                        kpt_thr)
+
+            
+            ###########################################
+            print(self.side)
+            if self.side == 1:
+                #####正面
+                whether_visible = np.ones((1,26))
+                whether_visible[0,24] = 0
+                whether_visible[0,25] = 0
+                #####侧面左
+            elif self.side == 2:
+                whether_visible = np.array([[0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0]])
+                #####侧面右
+            elif self.side == 3:
+                whether_visible = np.array([[0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1]])
+                #####背面
+            elif self.side == 4:
+                whether_visible = np.array([[0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1]])
+        
+        if 'keypoints' in instances:
+            keypoints = instances.get('transformed_keypoints',
+                                      instances.keypoints)
+
+            if 'keypoints_visible' in instances:
+                keypoints_visible = instances.keypoints_visible
+            else:
+                keypoints_visible = np.ones(keypoints.shape[:-1])
+
+            for kpts, visible, whe in zip(keypoints, keypoints_visible, whether_visible):
+                kpts = np.array(kpts, copy=False)
+            ### 点改颜色
+                if self.kpt_color is None or isinstance(self.kpt_color, str):
+                    kpt_color = [self.kpt_color] * len(kpts)
+                elif len(self.kpt_color) == len(kpts):
+                    kpt_color = self.kpt_color
+                else:
+                    raise ValueError(
+                        f'the length of kpt_color '
+                        f'({len(self.kpt_color)}) does not matches '
+                        f'that of keypoints ({len(kpts)})')
+                #link 改颜色
+                # draw links
+                if self.skeleton is not None and self.link_color is not None:
+                    if self.link_color is None or isinstance(
+                            self.link_color, str):
+                        link_color = [self.link_color] * len(self.skeleton)
+                    elif len(self.link_color) == len(self.skeleton):
+                        link_color = self.link_color
+                    else:
+                        raise ValueError(
+                            f'the length of link_color '
+                            f'({len(self.link_color)}) does not matches '
+                            f'that of skeleton ({len(self.skeleton)})')
+                    if kpts.shape[0] ==26:
+                        if self.side == 1:
+                            self.skeleton = [(15, 13), (13, 11), (11, 19), (16, 14), (14, 12), (12, 19), (17, 18), (18, 19), (18, 5), (5, 7), (7, 9), (18, 6), (6, 8), (8, 10), (1, 2), (0, 1), (0, 2), (1, 3), (2, 4), (15, 20), (15, 22), (16, 21), (16, 23)]
+                        if self.side == 2:
+                            self.skeleton = [(3,5), (5,11), (11,13), (13,15), (15,24), (15,20)]
+                        if self.side == 3:
+                            self.skeleton = [(4,6), (6,12), (12,14), (14,16), (16,25), (16,21)]
+                        if self.side == 4:
+                            self.skeleton = [(15, 13), (13, 11), (11, 19), (16, 14), (14, 12), (12, 19), (17, 18), (18, 19), (18, 5), (5, 7), (7, 9), (18, 6), (6, 8), (8, 10), (15,24), (16, 25)]
+                    
+                    for sk_id, sk in enumerate(self.skeleton):
+                        pos1 = (int(kpts[sk[0], 0]), int(kpts[sk[0], 1]))
+                        pos2 = (int(kpts[sk[1], 0]), int(kpts[sk[1], 1]))
+
+                        if (pos1[0] <= 0 or pos1[0] >= img_w or pos1[1] <= 0
+                                or pos1[1] >= img_h or pos2[0] <= 0
+                                or pos2[0] >= img_w or pos2[1] <= 0
+                                or pos2[1] >= img_h or visible[sk[0]] < kpt_thr
+                                or visible[sk[1]] < kpt_thr
+                                or link_color[sk_id] is None):
+                            # skip the link that should not be drawn
+                            continue
+                        #
+                        X = np.array((pos1[0], pos2[0]))
+                        Y = np.array((pos1[1], pos2[1]))
+                        color = link_color[sk_id]
+                        if not isinstance(color, str):
+                            #######################################################改固定颜色
+                            color = tuple(int(c) for c in color)
+                        transparency = self.alpha
+                        if self.show_keypoint_weight:
+                            transparency *= max(
+                                0,
+                                min(1,
+                                    0.5 * (visible[sk[0]] + visible[sk[1]])))
+
+                        self.draw_lines(
+                            X, Y, color, line_widths=self.line_width)
+                #点改颜色
+                # draw each point on image
+                for kid, kpt in enumerate(kpts):
+                    if visible[kid] < kpt_thr or kpt_color[kid] is None or whe[kid] == 0:
+                        # skip the point that should not be drawn
+                        continue
+
+                    color = kpt_color[kid]
+                    ###################################################改固定颜色
+                    if not isinstance(color, str):
+                        color = tuple(int(c) for c in color)
+                    transparency = self.alpha
+                    if self.show_keypoint_weight:
+                        transparency *= max(0, min(1, visible[kid]))
+                    self.draw_circles(
+                        kpt,
+                        radius=np.array([self.radius]),
+                        face_colors=color,
+                        edge_colors=color,
+                        alpha=transparency,
+                        line_widths=self.radius)
+                    if show_kpt_idx:
+                        kpt_idx_coords = kpt + [self.radius, -self.radius]
+                        self.draw_texts(
+                            str(kid),
+                            kpt_idx_coords,
+                            colors=color,
+                            font_sizes=self.radius * 3,
+                            vertical_alignments='bottom',
+                            horizontal_alignments='center')
+        img = self.get_image()
+        cv2.imwrite('demo/resources/skeleton.png',img)
     def _draw_instances_bbox(self, image: np.ndarray,
                              instances: InstanceData) -> np.ndarray:
         """Draw bounding boxes and corresponding labels of GT or prediction.
@@ -244,7 +464,8 @@ class PoseLocalVisualizer(OpencvBackendVisualizer):
                              instances: InstanceData,
                              kpt_thr: float = 0.3,
                              show_kpt_idx: bool = False,
-                             skeleton_style: str = 'mmpose'):
+                             skeleton_style: str = 'mmpose',
+                             side: int = 1,):
         """Draw keypoints and skeletons (optional) of GT or prediction.
 
         Args:
@@ -261,14 +482,39 @@ class PoseLocalVisualizer(OpencvBackendVisualizer):
         Returns:
             np.ndarray: the drawn image which channel is RGB.
         """
-
-        if skeleton_style == 'openpose':
-            return self._draw_instances_kpts_openpose(image, instances,
-                                                      kpt_thr)
-
-        self.set_image(image)
+        # self.my_draw_instances_kpts(self, image,instances,kpt_thr,show_kpt_idx,skeleton_style)
+        ## 定义点和线的颜色
         img_h, img_w, _ = image.shape
+        full_skeleton = self.skeleton
+        
+        self.set_image(image)
+        if instances.keypoints.shape[1] ==26:
+            a = np.array([255,69,0], dtype=np.uint8)
+            self.kpt_color = np.expand_dims(a,0).repeat(26,axis=0)
+            b = np.array([51, 153, 255], dtype=np.uint8)
+            self.link_color = np.expand_dims(b,0).repeat(27,axis=0)
+            if skeleton_style == 'openpose':
+                return self._draw_instances_kpts_openpose(image, instances,
+                                                        kpt_thr)
 
+            
+            ###########################################
+            print(self.side)
+            if self.side == 1:
+                #####正面
+                whether_visible = np.ones((1,26))
+                whether_visible[0,24] = 0
+                whether_visible[0,25] = 0
+                #####侧面左
+            elif self.side == 2:
+                whether_visible = np.array([[0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0]])
+                #####侧面右
+            elif self.side == 3:
+                whether_visible = np.array([[0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1]])
+                #####背面
+            elif self.side == 4:
+                whether_visible = np.array([[0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1]])
+        
         if 'keypoints' in instances:
             keypoints = instances.get('transformed_keypoints',
                                       instances.keypoints)
@@ -278,9 +524,9 @@ class PoseLocalVisualizer(OpencvBackendVisualizer):
             else:
                 keypoints_visible = np.ones(keypoints.shape[:-1])
 
-            for kpts, visible in zip(keypoints, keypoints_visible):
+            for kpts, visible, whe in zip(keypoints, keypoints_visible, whether_visible):
                 kpts = np.array(kpts, copy=False)
-
+            ### 点改颜色
                 if self.kpt_color is None or isinstance(self.kpt_color, str):
                     kpt_color = [self.kpt_color] * len(kpts)
                 elif len(self.kpt_color) == len(kpts):
@@ -290,7 +536,7 @@ class PoseLocalVisualizer(OpencvBackendVisualizer):
                         f'the length of kpt_color '
                         f'({len(self.kpt_color)}) does not matches '
                         f'that of keypoints ({len(kpts)})')
-
+                #link 改颜色
                 # draw links
                 if self.skeleton is not None and self.link_color is not None:
                     if self.link_color is None or isinstance(
@@ -303,7 +549,16 @@ class PoseLocalVisualizer(OpencvBackendVisualizer):
                             f'the length of link_color '
                             f'({len(self.link_color)}) does not matches '
                             f'that of skeleton ({len(self.skeleton)})')
-
+                    if kpts.shape[0] ==26:
+                        if self.side == 1:
+                            self.skeleton = [(15, 13), (13, 11), (11, 19), (16, 14), (14, 12), (12, 19), (17, 18), (18, 19), (18, 5), (5, 7), (7, 9), (18, 6), (6, 8), (8, 10), (1, 2), (0, 1), (0, 2), (1, 3), (2, 4), (15, 20), (15, 22), (16, 21), (16, 23)]
+                        if self.side == 2:
+                            self.skeleton = [(3,5), (5,11), (11,13), (13,15), (15,24), (15,20)]
+                        if self.side == 3:
+                            self.skeleton = [(4,6), (6,12), (12,14), (14,16), (16,25), (16,21)]
+                        if self.side == 4:
+                            self.skeleton = [(15, 13), (13, 11), (11, 19), (16, 14), (14, 12), (12, 19), (17, 18), (18, 19), (18, 5), (5, 7), (7, 9), (18, 6), (6, 8), (8, 10), (15,24), (16, 25)]
+                    
                     for sk_id, sk in enumerate(self.skeleton):
                         pos1 = (int(kpts[sk[0], 0]), int(kpts[sk[0], 1]))
                         pos2 = (int(kpts[sk[1], 0]), int(kpts[sk[1], 1]))
@@ -316,11 +571,12 @@ class PoseLocalVisualizer(OpencvBackendVisualizer):
                                 or link_color[sk_id] is None):
                             # skip the link that should not be drawn
                             continue
-
+                        #
                         X = np.array((pos1[0], pos2[0]))
                         Y = np.array((pos1[1], pos2[1]))
                         color = link_color[sk_id]
                         if not isinstance(color, str):
+                            #######################################################改固定颜色
                             color = tuple(int(c) for c in color)
                         transparency = self.alpha
                         if self.show_keypoint_weight:
@@ -331,14 +587,15 @@ class PoseLocalVisualizer(OpencvBackendVisualizer):
 
                         self.draw_lines(
                             X, Y, color, line_widths=self.line_width)
-
+                #点改颜色
                 # draw each point on image
                 for kid, kpt in enumerate(kpts):
-                    if visible[kid] < kpt_thr or kpt_color[kid] is None:
+                    if visible[kid] < kpt_thr or kpt_color[kid] is None or whe[kid] == 0:
                         # skip the point that should not be drawn
                         continue
 
                     color = kpt_color[kid]
+                    ###################################################改固定颜色
                     if not isinstance(color, str):
                         color = tuple(int(c) for c in color)
                     transparency = self.alpha
@@ -360,9 +617,487 @@ class PoseLocalVisualizer(OpencvBackendVisualizer):
                             font_sizes=self.radius * 3,
                             vertical_alignments='bottom',
                             horizontal_alignments='center')
+        img = self.get_image()
+        if self.show_lines:
+            if self.side ==1:
+                points_horizon = kpts[[6,8,12,14,16],1]
+                points_vertical = kpts[[19],0]
+            elif self.side ==2:
+                points_horizon = []
+                points_vertical = kpts[[15],0]
+            elif self.side ==3:
+                points_horizon = []
+                points_vertical = kpts[[16],0]
+            elif self.side ==4:
+                points_horizon = kpts[[5,7,11,13,15],1]
+                points_vertical = kpts[[19],0]
+            else:
+                points_horizon = []
+                points_vertical = []
+            height, width = img.shape[:2]
 
-        return self.get_image()
+            # 绘制水平线
+            for y in points_horizon:
+                y = int(y)
+                cv2.line(img, (0, y), (width, y), color=(0,250,154), thickness=2)
 
+            # 绘制垂直线
+            for x in points_vertical:
+                x = int(x)
+                cv2.line(img, (x, 0), (x, height), color=(0,250,154), thickness=2)
+        def cal_degree(i, j, d, thre, interval):
+            x1, y1 = kpts[[i],0], kpts[[i],1]
+            x2, y2 = kpts[[j],0], kpts[[j],1]
+
+            # 计算连线的斜率
+            delta_x = x2 - x1
+            delta_y = y2 - y1
+
+            # 计算连线与垂线之间的角度
+            if d:
+                angle_radians = math.atan2(delta_x, delta_y)  # 计算反正切，返回的是弧度
+            else:
+                angle_radians = math.atan2(delta_y, delta_x)  # 计算反正切，返回的是弧度
+            angle_degrees = math.degrees(angle_radians)  # 转换为角度
+
+            # 如果你只关心与水平线的夹角
+            if angle_degrees > 90:
+                angle_degrees = 180-angle_degrees
+            if angle_degrees != 0:
+                if self.side == 1 or self.side ==4:
+                    label = '右'
+                if self.side == 2:
+                    label = '前'
+                if self.side ==3:
+                    label = '后'
+            else:
+                label = '-'
+            if angle_degrees < 0.0:
+                angle_degrees = min(abs(angle_degrees), 180.0 +angle_degrees)
+                if self.side == 1 or self.side ==4:
+                    label = '左'
+                if self.side == 2:
+                    label = '后'
+                if self.side ==3:
+                    label = '前'
+            if angle_degrees < thre:
+                score = '正常'
+            else:
+                if angle_degrees < thre + interval:
+                    score = '轻微'
+                else:
+                    if angle_degrees < thre + interval*2:
+                        score = '明显'
+                    else:
+                        score = '严重'
+            return angle_degrees, label, score
+        
+        def calculate_angle_between_three_points(i, j, k, thre, interval):
+            """
+            计算三个点形成的夹角，并返回较小的角度。
+            """
+            xA, yA = kpts[[i],0], kpts[[i],1]
+            xB, yB = kpts[[j],0], kpts[[j],1]
+            xC, yC = kpts[[k],0], kpts[[k],1]
+            # 向量 AB
+            AB = (xA - xB, yA - yB)
+            # 向量 BC
+            BC = (xC - xB, yC - yB)
+
+            # 计算向量的点积和模长
+            dot_product = AB[0] * BC[0] + AB[1] * BC[1]
+            magnitude_AB = math.sqrt(AB[0]**2 + AB[1]**2)
+            magnitude_BC = math.sqrt(BC[0]**2 + BC[1]**2)
+
+            # 计算夹角的余弦值
+            cosine_angle = dot_product / (magnitude_AB * magnitude_BC)
+
+            # 反余弦得到角度，结果是弧度
+            angle_radians = math.acos(cosine_angle)
+
+            # 将弧度转换为度
+            angle_degrees = math.degrees(angle_radians)
+
+            # 使用叉积判断朝向
+            cross_product = AB[0] * BC[1] - AB[1] * BC[0]
+            
+            if cross_product > 0:
+                orientation = "逆时针"
+            elif cross_product < 0:
+                orientation = "顺时针"
+            else:
+                orientation = "共线"
+
+            # 返回夹角和朝向
+            # return angle_degrees, orientation
+
+            # 确保返回的角度在 [0, 180) 范围内
+            smaller_angle = min(angle_degrees, 180 - angle_degrees)
+            angle_degrees = smaller_angle
+            if angle_degrees < thre:
+                score = '正常'
+            else:
+                if angle_degrees < thre + interval:
+                    score = '轻微'
+                else:
+                    if angle_degrees < thre + interval*2:
+                        score = '明显'
+                    else:
+                        score = '严重'
+            return angle_degrees, score, orientation
+        df = pd.DataFrame(columns=["id","degree","oren","level",'range', 'interval', 'class'])
+        if self.side ==1:
+               
+            ## 头倾斜角度
+            head_vertical, label, score = cal_degree(17, 18, 1, 4, 1.5)
+            id = '头部倾斜'
+            print(f"头部倾斜角度: {label}, {head_vertical}度   {score}")
+            new_row = {"id": id,"degree": head_vertical,"oren": label,"level": score,'range': 1.3, 'interval':2.5, 'class':'头颈部'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            ## 头水平
+            head_horizon, label, score = cal_degree(3, 4, 0, 4, 1.5)
+            id = '头部水平'
+            print(f"头水平倾斜角度: {label},  {head_horizon}度   {score}")
+            new_row = {"id": id,"degree": head_horizon,"oren": label,"level": score,'range': 1.5, 'interval':2.4, 'class':'头颈部'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            ## 高低肩
+            shoulder_horizon, label, score = cal_degree(5, 6, 0, 2.5, 1) 
+            id = '双肩水平'
+            print(f"高低肩倾斜角度: {label},  {shoulder_horizon}度   {score}")
+            new_row = {"id": id,"degree": shoulder_horizon,"oren": label,"level": score,'range': 1.2, 'interval':2, 'class':'肩部'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            ## 脊柱角度
+            spin_vertical, label, score = cal_degree(18, 19, 1, 3, 1.2)
+            id = '躯干倾斜'
+            print(f"躯干倾斜角度: {label}, {spin_vertical}度   {score}")
+            new_row = {"id": id,"degree": spin_vertical,"oren": label,"level": score,'range': 1.2, 'interval':2, 'class':'躯干'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            ## 骨盆
+            till_horizon, label, score = cal_degree(11, 12, 0, 2, 1.5)
+            id = '骨盆水平'
+            print(f"骨盆倾斜角度: {label}, {till_horizon}度   {score}")
+            new_row = {"id": id,"degree": till_horizon,"oren": label,"level": score,'range': 0.2, 'interval':1.6, 'class':'骨盆'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            ## 膝盖水平
+            knee_horizon, label, score = cal_degree(13, 14, 0, 2, 1.5)
+            id = '膝关节水平'
+            print(f"膝关节对线角度: {label}, {knee_horizon}度   {score}")
+            new_row = {"id": id,"degree": knee_horizon,"oren": label,"level": score,'range': 0.2, 'interval':1.6, 'class':'腿部'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            ## 踝关节
+            ankel_horizon, label, score = cal_degree(15, 16, 0, 2, 1.5)
+            id = '踝关节水平'
+            print(f"踝关节对线角度: {label}, {ankel_horizon}度   {score}")
+            new_row = {"id": id,"degree": ankel_horizon,"oren": label,"level": score,'range': 0.2, 'interval':1.6, 'class':'脚部'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            #################################################判断是否圆肩
+            ## 肱骨角度
+            left_arm_vertical, score, oren = calculate_angle_between_three_points(5, 7, 9, 6, 5)
+            id = '左肱骨弯曲'
+            print(f"左边肱骨角度: {left_arm_vertical}度   {score}")
+            new_row = {"id": id,"degree": left_arm_vertical,"oren": oren,"level": score,'range': 3.5, 'interval':2, 'class':'肩部'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            ## 肱骨角度
+            right_arm_vertical, score, oren = calculate_angle_between_three_points(6, 8, 10, 6, 5)
+            id = '右肱骨弯曲'
+            print(f"右边肱骨角度: {right_arm_vertical}度   {score}")
+            new_row = {"id": id,"degree": right_arm_vertical,"oren": oren,"level": score,'range': 3.5, 'interval':2, 'class':'肩部'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            ## 左膝盖内外
+            knee_vertical, score, oren = calculate_angle_between_three_points(11, 13, 15, 3, 3)
+            id = '左腿Q角'
+            if oren == '逆时针':
+                oren = '内'
+            else:
+                oren = '外'
+            print(f"左腿Q角度: {knee_vertical}度   {score} {oren}")
+            new_row = {"id": id,"degree": knee_vertical+15,"oren": oren,"level": score,'range': 15, 'interval':5, 'class':'腿部'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            ## 右膝盖内外
+            knee_vertical, score, oren = calculate_angle_between_three_points(12, 14, 16, 3, 3)
+            id = '右腿Q角'
+            if oren == '逆时针':
+                oren = '外'
+            else:
+                oren = '内'
+            print(f"右腿Q角度: {knee_vertical}度   {score} {oren}")
+            new_row = {"id": id,"degree": knee_vertical+15,"oren": oren,"level": score,'range': 15, 'interval':5, 'class':'腿部'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            df.to_csv('report/正面数据',encoding="utf_8_sig")
+        if self.side ==2:
+            ## 头前引
+            neck_vertical, label, score = cal_degree(3, 5, 1, 6.5, 1.5)
+            id = '颈椎倾斜'
+            print(f"颈椎倾斜角度: {label}, {neck_vertical}度   {score}")
+            new_row = {"id": id,"degree": neck_vertical,"oren": label,"level": score,'range': 1.9, 'interval':4.5, 'class':'头颈部'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            ## 肱骨前移
+            shoulder_vertical, label, score = cal_degree(7, 5, 1, 5, 1.5)
+            if label  == '前':
+                label = '-'
+            else:
+                label = '前'
+            id = '左肱骨位置'
+            print(f"肱骨前移角度: {label}, {shoulder_vertical}度   {score}")
+            new_row = {"id": id,"degree": shoulder_vertical,"oren": label,"level": score,'range': 3.5, 'interval':1, 'class':'肩部'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+            ## 膝超伸
+            # if label  == '前':
+            #     label = '后'
+            # else:
+            #     label = '前'
+            id = '膝超伸'
+            knee_vertical, label, score = cal_degree(13, 15, 1, 5, 1.5)
+            print(f"膝超伸: {label}, {knee_vertical}度   {score}")
+            new_row = {"id": id,"degree": knee_vertical,"oren": label,"level": score,'range': 3.5, 'interval':1.5, 'class':'腿部'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+            ## 重心前移
+            id = '左重心前移'
+            gravity_front, label, score = cal_degree(5, 15, 1, 5, 1.5)
+            print(f"左重心前移: {label}, {gravity_front}度   {score}")
+            new_row = {"id": id,"degree": gravity_front,"oren": label,"level": score,'range': 3.5, 'interval':1.5, 'class':'躯干'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+            ## 骨盆前移
+            id = '骨盆前/后移'
+            till_front, label, score = cal_degree(11, 15, 1, 3.5, 1)
+
+            print(f"骨盆前移角度: {label}, {till_front}度   {score}")
+            new_row = {"id": id,"degree": till_front,"oren": label,"level": score,'range': 2.5, 'interval':1, 'class':'骨盆'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            ## 骨盆前倾
+            pelvis_tilt, score, oren = calculate_angle_between_three_points(5, 11, 15, 6, 2)
+            id = '骨盆前/后倾'
+            if oren == '逆时针':
+                oren = '前'
+            else:
+                oren = '后'
+
+            print(f"骨盆{oren}倾角度: {oren} {pelvis_tilt}度   {score}")
+            new_row = {"id": id,"degree": pelvis_tilt+11,"oren": oren,"level": score,'range': 12, 'interval':5, 'class':'骨盆'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            df.to_csv('report/左侧面数据',encoding="utf_8_sig")
+        if self.side ==3:
+            ## 头前引
+            neck_vertical, label, score = cal_degree(4, 6, 1, 6.5, 1.5)
+            id = '颈椎倾斜'
+            print(f"颈椎倾斜角度: {label}, {neck_vertical}度   {score}")
+            new_row = {"id": id,"degree": neck_vertical,"oren": label,"level": score,'range': 1.9, 'interval':4.5, 'class':'头颈部'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            ## 肱骨前移
+            shoulder_vertical, label, score = cal_degree(8, 6, 1, 5, 1.5)
+            if label  == '前':
+                label = '后'
+            else:
+                label = '前'
+            id = '右肱骨位置'
+            print(f"肱骨前移角度: {label}, {shoulder_vertical}度   {score}")
+            new_row = {"id": id,"degree": shoulder_vertical,"oren": label,"level": score,'range': 3.5, 'interval':1, 'class':'肩部'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+            ## 膝超伸
+            knee_vertical, label, score = cal_degree(14, 16, 1, 5, 1.5)
+            # if label  == '前':
+            #     label = '后'
+            # else:
+            #     label = '前'
+            id = '膝超伸'
+            print(f"膝超伸角度: {label}, {knee_vertical}度   {score}")
+            new_row = {"id": id,"degree": knee_vertical,"oren": label,"level": score,'range': 3.5, 'interval':1.5, 'class':'腿部'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+            ## 重心前移
+            id = '右重心前移'
+            gravity_front, label, score = cal_degree(6, 16, 1, 5, 1.5)
+            print(f"右重心前移: {label}, {gravity_front}度   {score}")
+            new_row = {"id": id,"degree": gravity_front,"oren": label,"level": score,'range': 3.5, 'interval':1.5, 'class':'躯干'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+            ## 骨盆前移
+            id = '骨盆前/后移'
+            till_front, label, score = cal_degree(12, 16, 1, 3.5, 1.5)
+            print(f"骨盆前移角度: {label}, {till_front}度   {score}")
+            new_row = {"id": id,"degree": till_front,"oren": label,"level": score,'range': 2.5, 'interval':1, 'class':'骨盆'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            ## 骨盆前倾
+            pelvis_tilt, score, oren = calculate_angle_between_three_points(6, 12, 16, 6, 2)
+            id = '骨盆前/后倾'
+            if oren == '逆时针':
+                oren = '后'
+            else:
+                oren = '前'
+            print(f"骨盆{oren}倾角度: {pelvis_tilt}度   {score}")
+            new_row = {"id": id,"degree": pelvis_tilt+11,"oren": label,"level": score,'range': 12, 'interval':5, 'class':'骨盆'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            df.to_csv('report/右侧面数据',encoding="utf_8_sig")
+        if self.side ==4:
+            ## 骨盆
+            till_horizon, label, score = cal_degree(11, 12, 0, 2, 1.5)
+            id = '骨盆水平'
+            print(f"骨盆倾斜角度: {label}, {till_horizon}度   {score}")
+            new_row = {"id": id,"degree": till_horizon,"oren": label,"level": score,'range': 0.2, 'interval':1.6, 'class':'骨盆'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            ## 左足弓
+            foot_vertical, label, score = cal_degree(15, 24, 1, 5, 1)
+            id = '左足内/外翻'
+            oren = ''
+            if label =='左':
+                oren = '外'
+            else:
+                oren = '内'
+            print(f"足{oren}倾斜角度: {label}, {foot_vertical}度   {score}")
+            new_row = {"id": id,"degree": foot_vertical,"oren": oren,"level": score,'range': 5, 'interval':4, 'class':'脚部'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            ## 右足弓
+            foot_vertical, label, score = cal_degree(16, 25, 1, 5, 1)
+            id = '右足内/外翻'
+            if label =='左':
+                oren = '内'
+            else:
+                oren = '外'
+            print(f"足{oren}倾斜角度: {label}, {foot_vertical}度   {score}")
+            new_row = {"id": id,"degree": foot_vertical,"oren": oren,"level": score,'range': 5, 'interval':4, 'class':'脚部'}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            df.to_csv('report/背面数据',encoding="utf_8_sig")
+
+
+        ##############################################
+       
+        self.skeleton = full_skeleton
+        transparent_image = np.zeros((img_h, img_w, 3), dtype=np.uint8)
+        self.set_image(transparent_image)
+        if instances.keypoints.shape[1] ==26:
+            a = np.array([255,69,0], dtype=np.uint8)
+            self.kpt_color = np.expand_dims(a,0).repeat(26,axis=0)
+            b = np.array([51, 153, 255], dtype=np.uint8)
+            self.link_color = np.expand_dims(b,0).repeat(27,axis=0)
+            if skeleton_style == 'openpose':
+                return self._draw_instances_kpts_openpose(image, instances,
+                                                        kpt_thr)
+
+            
+            ###########################################
+            # print(self.side)
+            if self.side == 1:
+                #####正面
+                whether_visible = np.ones((1,26))
+                whether_visible[0,24] = 0
+                whether_visible[0,25] = 0
+           
+                if 'keypoints' in instances:
+                    keypoints = instances.get('transformed_keypoints',
+                                            instances.keypoints)
+
+                    if 'keypoints_visible' in instances:
+                        keypoints_visible = instances.keypoints_visible
+                    else:
+                        keypoints_visible = np.ones(keypoints.shape[:-1])
+
+                    for kpts, visible, whe in zip(keypoints, keypoints_visible, whether_visible):
+                        kpts = np.array(kpts, copy=False)
+                    ### 点改颜色
+                        if self.kpt_color is None or isinstance(self.kpt_color, str):
+                            kpt_color = [self.kpt_color] * len(kpts)
+                        elif len(self.kpt_color) == len(kpts):
+                            kpt_color = self.kpt_color
+                        else:
+                            raise ValueError(
+                                f'the length of kpt_color '
+                                f'({len(self.kpt_color)}) does not matches '
+                                f'that of keypoints ({len(kpts)})')
+                        #link 改颜色
+                        # draw links
+                        if self.skeleton is not None and self.link_color is not None:
+                            if self.link_color is None or isinstance(
+                                    self.link_color, str):
+                                link_color = [self.link_color] * len(self.skeleton)
+                            elif len(self.link_color) == len(self.skeleton):
+                                link_color = self.link_color
+                            else:
+                                raise ValueError(
+                                    f'the length of link_color '
+                                    f'({len(self.link_color)}) does not matches '
+                                    f'that of skeleton ({len(self.skeleton)})')
+                            if kpts.shape[0] ==26:
+                                if self.side == 1:
+                                    self.skeleton = [(15, 13), (13, 11), (11, 19), (16, 14), (14, 12), (12, 19), (17, 18), (18, 19), (18, 5), (5, 7), (7, 9), (18, 6), (6, 8), (8, 10), (1, 2), (0, 1), (0, 2), (1, 3), (2, 4), (15, 20), (15, 22), (16, 21), (16, 23)]
+                                if self.side == 2:
+                                    self.skeleton = [(3,5), (5,11), (11,13), (13,15), (15,24), (15,20)]
+                                if self.side == 3:
+                                    self.skeleton = [(4,6), (6,12), (12,14), (14,16), (16,25), (16,21)]
+                                if self.side == 4:
+                                    self.skeleton = [(15, 13), (13, 11), (11, 19), (16, 14), (14, 12), (12, 19), (17, 18), (18, 19), (18, 5), (5, 7), (7, 9), (18, 6), (6, 8), (8, 10), (15,24), (16, 25)]
+                            
+                            for sk_id, sk in enumerate(self.skeleton):
+                                pos1 = (int(kpts[sk[0], 0]), int(kpts[sk[0], 1]))
+                                pos2 = (int(kpts[sk[1], 0]), int(kpts[sk[1], 1]))
+
+                                if (pos1[0] <= 0 or pos1[0] >= img_w or pos1[1] <= 0
+                                        or pos1[1] >= img_h or pos2[0] <= 0
+                                        or pos2[0] >= img_w or pos2[1] <= 0
+                                        or pos2[1] >= img_h or visible[sk[0]] < kpt_thr
+                                        or visible[sk[1]] < kpt_thr
+                                        or link_color[sk_id] is None):
+                                    # skip the link that should not be drawn
+                                    continue
+                                #
+                                X = np.array((pos1[0], pos2[0]))
+                                Y = np.array((pos1[1], pos2[1]))
+                                color = link_color[sk_id]
+                                if not isinstance(color, str):
+                                    #######################################################改固定颜色
+                                    color = tuple(int(c) for c in color)
+                                transparency = self.alpha
+                                if self.show_keypoint_weight:
+                                    transparency *= max(
+                                        0,
+                                        min(1,
+                                            0.5 * (visible[sk[0]] + visible[sk[1]])))
+
+                                self.draw_lines(
+                                    X, Y, color, line_widths=self.line_width)
+                        #点改颜色
+                        # draw each point on image
+                        for kid, kpt in enumerate(kpts):
+                            if visible[kid] < kpt_thr or kpt_color[kid] is None or whe[kid] == 0:
+                                # skip the point that should not be drawn
+                                continue
+
+                            color = kpt_color[kid]
+                            ###################################################改固定颜色
+                            if not isinstance(color, str):
+                                color = tuple(int(c) for c in color)
+                            transparency = self.alpha
+                            if self.show_keypoint_weight:
+                                transparency *= max(0, min(1, visible[kid]))
+                            self.draw_circles(
+                                kpt,
+                                radius=np.array([self.radius]),
+                                face_colors=color,
+                                edge_colors=color,
+                                alpha=transparency,
+                                line_widths=self.radius)
+                            if show_kpt_idx:
+                                kpt_idx_coords = kpt + [self.radius, -self.radius]
+                                self.draw_texts(
+                                    str(kid),
+                                    kpt_idx_coords,
+                                    colors=color,
+                                    font_sizes=self.radius * 3,
+                                    vertical_alignments='bottom',
+                                    horizontal_alignments='center')
+        full_kpts = np.squeeze(instances.keypoints)
+        skeleton_img = self.get_image()
+        
+        # skeleton_img, af_kpts = process_image_and_keypoints(skeleton_img, full_kpts)
+        np.save('demo/resources/full_kpts.npy', full_kpts)
+        cv2.imwrite('demo/resources/skeleton_org.png',skeleton_img)
+        return img
+    
+
+############################修改
     def _draw_instances_kpts_openpose(self,
                                       image: np.ndarray,
                                       instances: InstanceData,
@@ -582,6 +1317,7 @@ class PoseLocalVisualizer(OpencvBackendVisualizer):
                        wait_time: float = 0,
                        out_file: Optional[str] = None,
                        kpt_thr: float = 0.3,
+                       side: int = 1,
                        step: int = 0) -> None:
         """Draw datasample and save to all backends.
 
@@ -631,7 +1367,7 @@ class PoseLocalVisualizer(OpencvBackendVisualizer):
             if 'gt_instances' in data_sample:
                 gt_img_data = self._draw_instances_kpts(
                     gt_img_data, data_sample.gt_instances, kpt_thr,
-                    show_kpt_idx, skeleton_style)
+                    show_kpt_idx, skeleton_style, side)
                 if draw_bbox:
                     gt_img_data = self._draw_instances_bbox(
                         gt_img_data, data_sample.gt_instances)

@@ -29,7 +29,7 @@ def parse_args():
         help='Whether to show the index of keypoints')
     parser.add_argument(
         '--skeleton-style',
-        default='mmpose',
+        default='openpose',
         type=str,
         choices=['mmpose', 'openpose'],
         help='Skeleton style selection')
@@ -41,12 +41,12 @@ def parse_args():
     parser.add_argument(
         '--radius',
         type=int,
-        default=3,
+        default=10,
         help='Keypoint radius for visualization')
     parser.add_argument(
         '--thickness',
         type=int,
-        default=1,
+        default=2,
         help='Link thickness for visualization')
     parser.add_argument(
         '--alpha', type=float, default=0.8, help='The transparency of bboxes')
@@ -94,7 +94,7 @@ def main():
         img,
         data_sample=results,
         draw_gt=False,
-        draw_bbox=True,
+        draw_bbox=False,
         kpt_thr=args.kpt_thr,
         draw_heatmap=args.draw_heatmap,
         show_kpt_idx=args.show_kpt_idx,
